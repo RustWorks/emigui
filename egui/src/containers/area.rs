@@ -6,8 +6,9 @@ use std::{fmt::Debug, hash::Hash, sync::Arc};
 
 use crate::*;
 
+/// State that is persisted between frames
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub(crate) struct State {
     /// Last known pos
     pub pos: Pos2,
@@ -21,7 +22,7 @@ pub(crate) struct State {
 
     /// You can throw a moveable Area. It's fun.
     /// TODO: separate out moveable to container?
-    #[cfg_attr(feature = "with_serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub vel: Vec2,
 }
 
@@ -31,6 +32,9 @@ impl State {
     }
 }
 
+/// An area on the screen that can be move by dragging.
+///
+/// This forms the base of the `Window` container.
 #[derive(Clone, Copy, Debug)]
 pub struct Area {
     id: Id,
@@ -90,6 +94,7 @@ impl Area {
         self
     }
 
+    /// Positions the window and prevents it from being moved
     pub fn fixed_pos(mut self, fixed_pos: impl Into<Pos2>) -> Self {
         let fixed_pos = fixed_pos.into();
         self.default_pos = Some(fixed_pos);

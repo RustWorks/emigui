@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    containers::{area, collapsing_header, menu, resize, scroll_area, window},
-    widgets::text_edit,
-    Id, Layer, Pos2, Rect,
+    area, collapsing_header, menu, resize, scroll_area, widgets::text_edit, window, Id, Layer,
+    Pos2, Rect,
 };
 
 /// The data that Egui persists between frames.
@@ -13,15 +12,11 @@ use crate::{
 ///
 /// If you want this to persist when closing your app you should serialize `Memory` and store it.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
-#[cfg_attr(feature = "with_serde", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Memory {
-    #[cfg_attr(feature = "with_serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) interaction: Interaction,
-
-    /// The widget with keyboard focus (i.e. a text input field).
-    #[cfg_attr(feature = "with_serde", serde(skip))]
-    pub(crate) kb_focus_id: Option<Id>,
 
     // states of various types of widgets
     pub(crate) collapsing_headers: HashMap<Id, collapsing_header::State>,
@@ -30,7 +25,7 @@ pub struct Memory {
     pub(crate) scroll_areas: HashMap<Id, scroll_area::State>,
     pub(crate) text_edit: HashMap<Id, text_edit::State>,
 
-    #[cfg_attr(feature = "with_serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) window_interaction: Option<window::WindowInteraction>,
 
     pub(crate) areas: Areas,
@@ -50,6 +45,9 @@ pub struct Interaction {
 
     /// A widget interested in drags that has a mouse press on it.
     pub drag_id: Option<Id>,
+
+    /// The widget with keyboard focus (i.e. a text input field).
+    pub kb_focus_id: Option<Id>,
 
     /// HACK: windows have low priority on dragging.
     /// This is so that if you drag a slider in a window,
@@ -71,11 +69,26 @@ impl Interaction {
     pub fn is_using_mouse(&self) -> bool {
         self.click_id.is_some() || self.drag_id.is_some()
     }
+
+    fn begin_frame(&mut self, prev_input: &crate::input::InputState) {
+        self.click_interest = false;
+        self.drag_interest = false;
+
+        if !prev_input.mouse.could_be_click {
+            self.click_id = None;
+        }
+
+        if !prev_input.mouse.down || prev_input.mouse.pos.is_none() {
+            // mouse was not down last frame
+            self.click_id = None;
+            self.drag_id = None;
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
-#[cfg_attr(feature = "with_serde", serde(default))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Areas {
     areas: HashMap<Id, area::State>,
     /// Top is last
@@ -93,17 +106,10 @@ pub struct Areas {
 
 impl Memory {
     pub(crate) fn begin_frame(&mut self, prev_input: &crate::input::InputState) {
-        self.interaction.click_interest = false;
-        self.interaction.drag_interest = false;
-
-        if !prev_input.mouse.could_be_click {
-            self.interaction.click_id = None;
-        }
+        self.interaction.begin_frame(prev_input);
 
         if !prev_input.mouse.down || prev_input.mouse.pos.is_none() {
             // mouse was not down last frame
-            self.interaction.click_id = None;
-            self.interaction.drag_id = None;
 
             let window_interaction = self.window_interaction.take();
             if let Some(window_interaction) = window_interaction {
@@ -121,11 +127,25 @@ impl Memory {
     }
 
     pub(crate) fn end_frame(&mut self) {
-        self.areas.end_frame()
+        self.areas.end_frame();
     }
 
     pub fn layer_at(&self, pos: Pos2, resize_interact_radius_side: f32) -> Option<Layer> {
         self.areas.layer_at(pos, resize_interact_radius_side)
+    }
+
+    pub fn has_kb_focus(&self, id: Id) -> bool {
+        self.interaction.kb_focus_id == Some(id)
+    }
+
+    pub fn request_kb_focus(&mut self, id: Id) {
+        self.interaction.kb_focus_id = Some(id);
+    }
+
+    pub fn surrender_kb_focus(&mut self, id: Id) {
+        if self.interaction.kb_focus_id == Some(id) {
+            self.interaction.kb_focus_id = None;
+        }
     }
 }
 

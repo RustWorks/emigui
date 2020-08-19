@@ -106,6 +106,14 @@ impl Ui {
         &self.painter
     }
 
+    /// Create a painter for a sub-region of this Ui.
+    ///
+    /// The clip-rect of the returned `Painter` will be the intersection
+    /// of the given rectangle and the `clip_rect()` of this `Ui`.
+    pub fn painter_at(&self, rect: Rect) -> Painter {
+        self.painter().sub_region(rect)
+    }
+
     /// Use this to paint stuff within this `Ui`.
     pub fn layer(&self) -> Layer {
         self.painter().layer()
@@ -259,14 +267,6 @@ impl Ui {
         self.ctx()
             .contains_mouse(self.layer(), self.clip_rect(), rect)
     }
-
-    pub fn has_kb_focus(&self, id: Id) -> bool {
-        self.memory().kb_focus_id == Some(id)
-    }
-
-    pub fn request_kb_focus(&self, id: Id) {
-        self.memory().kb_focus_id = Some(id);
-    }
 }
 
 /// # `Id` creation
@@ -344,6 +344,7 @@ impl Ui {
             clicked,
             double_clicked,
             active,
+            has_kb_focus,
             rect,
         } = interact;
         GuiResponse {
@@ -352,6 +353,7 @@ impl Ui {
             clicked,
             double_clicked,
             active,
+            has_kb_focus,
             rect,
             ctx: self.ctx().clone(),
         }
@@ -372,15 +374,15 @@ impl Ui {
     /// for `Justified` aligned layouts, like in menus.
     ///
     /// You may get LESS space than you asked for if the current layout won't fit what you asked for.
-    pub fn allocate_space(&mut self, child_size: Vec2) -> Rect {
-        let child_size = self.painter().round_vec_to_pixels(child_size);
+    pub fn allocate_space(&mut self, desired_size: Vec2) -> Rect {
+        let desired_size = self.painter().round_vec_to_pixels(desired_size);
         self.cursor = self.painter().round_pos_to_pixels(self.cursor);
 
         // For debug rendering
-        let too_wide = child_size.x > self.available().width();
-        let too_high = child_size.x > self.available().height();
+        let too_wide = desired_size.x > self.available().width();
+        let too_high = desired_size.x > self.available().height();
 
-        let rect = self.reserve_space_impl(child_size);
+        let rect = self.reserve_space_impl(desired_size);
 
         if self.style().debug_widget_rects {
             self.painter.add(PaintCmd::Rect {
@@ -424,6 +426,15 @@ impl Ui {
         self.child_bounds = self.child_bounds.union(child_rect);
         self.child_count += 1;
         child_rect
+    }
+
+    /// Ask to allocate a certain amount of space and return a Painter for that region.
+    ///
+    /// You may get back a `Painter` with a smaller or larger size than what you desired,
+    /// depending on the avilable space and the current layout.
+    pub fn allocate_canvas(&mut self, desired_size: Vec2) -> Painter {
+        let rect = self.allocate_space(desired_size);
+        self.painter_at(rect)
     }
 }
 

@@ -1,10 +1,12 @@
+//! Vectors, positions, rectangles etc.
+
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, RangeInclusive, Sub, SubAssign};
 
 /// A size or direction in 2D space.
 ///
 /// Normally given in points, e.g. logical pixels.
 #[derive(Clone, Copy, Default)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
@@ -17,6 +19,12 @@ pub fn vec2(x: f32, y: f32) -> Vec2 {
 
 impl From<[f32; 2]> for Vec2 {
     fn from(v: [f32; 2]) -> Self {
+        Self { x: v[0], y: v[1] }
+    }
+}
+
+impl From<&[f32; 2]> for Vec2 {
+    fn from(v: &[f32; 2]) -> Self {
         Self { x: v[0], y: v[1] }
     }
 }
@@ -114,6 +122,18 @@ impl Vec2 {
     #[must_use]
     pub fn max(self, other: Self) -> Self {
         vec2(self.x.max(other.x), self.y.max(other.y))
+    }
+
+    /// Returns the minimum of `self.x` and `self.y`.
+    #[must_use]
+    pub fn min_elem(self) -> f32 {
+        self.x.min(self.y)
+    }
+
+    /// Returns the maximum of `self.x` and `self.y`.
+    #[must_use]
+    pub fn max_elem(self) -> f32 {
+        self.x.max(self.y)
     }
 
     #[must_use]
@@ -228,7 +248,7 @@ impl std::fmt::Debug for Vec2 {
 ///
 /// Normally given in points, e.g. logical pixels.
 #[derive(Clone, Copy, Default)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Pos2 {
     pub x: f32,
     pub y: f32,
@@ -245,7 +265,17 @@ impl From<[f32; 2]> for Pos2 {
     }
 }
 
+impl From<&[f32; 2]> for Pos2 {
+    fn from(v: &[f32; 2]) -> Self {
+        Self { x: v[0], y: v[1] }
+    }
+}
+
 impl Pos2 {
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
     pub fn to_vec2(self) -> Vec2 {
         Vec2 {
             x: self.x,
@@ -363,7 +393,7 @@ impl std::fmt::Debug for Pos2 {
 ///
 /// Normally given in points, e.g. logical pixels.
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Rect {
     pub min: Pos2,
     pub max: Pos2,
@@ -492,6 +522,9 @@ impl Rect {
     pub fn height(&self) -> f32 {
         self.max.y - self.min.y
     }
+    pub fn area(&self) -> f32 {
+        self.width() * self.height()
+    }
 
     pub fn range_x(&self) -> RangeInclusive<f32> {
         self.min.x..=self.max.x
@@ -556,6 +589,7 @@ impl std::fmt::Debug for Rect {
 
 // ----------------------------------------------------------------------------
 
+/// Linear interpolation.
 pub fn lerp<T>(range: RangeInclusive<T>, t: f32) -> T
 where
     f32: Mul<T, Output = T>,
@@ -564,11 +598,15 @@ where
     (1.0 - t) * *range.start() + t * *range.end()
 }
 
+/// Linearly remap a value from one range to another,
+/// so that when `x == from.start()` returns `to.start()`
+/// and when `x == from.end()` returns `to.end()`.
 pub fn remap(x: f32, from: RangeInclusive<f32>, to: RangeInclusive<f32>) -> f32 {
     let t = (x - from.start()) / (from.end() - from.start());
     lerp(to, t)
 }
 
+/// Like `remap`, but also clamps the value so that the returned value is always in the `to` range.
 pub fn remap_clamp(x: f32, from: RangeInclusive<f32>, to: RangeInclusive<f32>) -> f32 {
     if x <= *from.start() {
         *to.start()
@@ -585,6 +623,9 @@ pub fn remap_clamp(x: f32, from: RangeInclusive<f32>, to: RangeInclusive<f32>) -
     }
 }
 
+/// Returns `range.start()` if `x <= range.start()`,
+/// returns `range.end()` if `x >= range.end()`
+/// and returns `x` elsewhen.
 pub fn clamp<T>(x: T, range: RangeInclusive<T>) -> T
 where
     T: Copy + PartialOrd,
@@ -610,9 +651,10 @@ pub fn ease_in_ease_out(t: f32) -> f32 {
 /// See <https://tauday.com/>
 pub const TAU: f32 = 2.0 * std::f32::consts::PI;
 
-pub fn round_to_precision(value: f32, precision: usize) -> f32 {
+/// Round a value to the given number of decimal places.
+pub fn round_to_precision(value: f32, decimal_places: usize) -> f32 {
     // This is a stupid way of doing this, but stupid works.
-    format!("{:.*}", precision, value)
+    format!("{:.*}", decimal_places, value)
         .parse()
         .unwrap_or_else(|_| value)
 }

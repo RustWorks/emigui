@@ -1,13 +1,29 @@
+//! Menu bar functionality.
+//!
+//! Usage:
+//! ``` rust
+//! fn show_menu(ui: &mut egui::Ui) {
+//!     use egui::{menu, Button};
+//!
+//!     menu::bar(ui, |ui| {
+//!         menu::menu(ui, "File", |ui| {
+//!             if ui.add(Button::new("Open")).clicked {
+//!                 // ...
+//!             }
+//!         });
+//!     });
+//! }
+//! ```
+
 use crate::{widgets::*, *};
 
-use super::*;
-
+/// What is saved between frames.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct BarState {
-    #[cfg_attr(feature = "with_serde", serde(skip))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub(crate) struct BarState {
+    #[cfg_attr(feature = "serde", serde(skip))]
     open_menu: Option<Id>,
-    #[cfg_attr(feature = "with_serde", serde(skip))]
+    #[cfg_attr(feature = "serde", serde(skip))]
     /// When did we open a menu?
     open_time: f64,
 }
@@ -18,6 +34,26 @@ impl Default for BarState {
             open_menu: None,
             open_time: f64::NEG_INFINITY,
         }
+    }
+}
+
+impl BarState {
+    fn load(ctx: &Context, bar_id: &Id) -> Self {
+        ctx.memory()
+            .menu_bar
+            .get(bar_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn save(self, ctx: &Context, bar_id: Id) {
+        ctx.memory().menu_bar.insert(bar_id, self);
+    }
+
+    fn close_menus(ctx: &Context, bar_id: Id) {
+        let mut bar_state = BarState::load(ctx, &bar_id);
+        bar_state.open_menu = None;
+        bar_state.save(ctx, bar_id);
     }
 }
 
@@ -38,7 +74,17 @@ pub fn bar<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> (R, Rect)
             let height = ui.style().menu_bar.height;
             ui.set_desired_height(height);
             ui.expand_to_size(vec2(ui.available().width(), height));
-            add_contents(ui)
+
+            let ret = add_contents(ui);
+
+            let clicked_outside = !ui.hovered(ui.rect()) && ui.input().mouse.released;
+            if clicked_outside || ui.input().key_pressed(Key::Escape) {
+                // TODO: this prevent sub-menus in menus. We should fix that.
+                let bar_id = ui.id();
+                BarState::close_menus(ui.ctx(), bar_id);
+            }
+
+            ret
         })
     })
 }
@@ -57,12 +103,7 @@ fn menu_impl<'c>(
     let bar_id = ui.id();
     let menu_id = bar_id.with(&title);
 
-    let mut bar_state = ui
-        .memory()
-        .menu_bar
-        .get(&bar_id)
-        .cloned()
-        .unwrap_or_default();
+    let mut bar_state = BarState::load(ui.ctx(), &bar_id);
 
     let mut button = Button::new(title);
 
@@ -105,7 +146,7 @@ fn menu_impl<'c>(
         }
     }
 
-    ui.memory().menu_bar.insert(bar_id, bar_state);
+    bar_state.save(ui.ctx(), bar_id);
 }
 
 fn interact_with_menu_button(
@@ -137,18 +178,5 @@ fn interact_with_menu_button(
 
     if button_interact.hovered && bar_state.open_menu.is_some() {
         bar_state.open_menu = Some(menu_id);
-    }
-
-    let pressed_escape = input.events.iter().any(|event| {
-        matches!(
-            event,
-            Event::Key {
-                key: Key::Escape,
-                pressed: true
-            }
-        )
-    });
-    if pressed_escape {
-        bar_state.open_menu = None;
     }
 }

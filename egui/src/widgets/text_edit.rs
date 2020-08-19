@@ -1,13 +1,14 @@
 use crate::{paint::*, *};
 
 #[derive(Clone, Copy, Debug, Default)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub(crate) struct State {
     /// Charctaer based, NOT bytes.
     /// TODO: store as line + row
     pub cursor: Option<usize>,
 }
 
+/// A text region that the user can edit the contents of.
 #[derive(Debug)]
 pub struct TextEdit<'t> {
     text: &'t mut String,
@@ -76,17 +77,20 @@ impl<'t> Widget for TextEdit<'t> {
         let interact = ui.interact(rect, id, Sense::click_and_drag()); // TODO: implement drag-select
 
         if interact.clicked {
-            ui.request_kb_focus(id);
+            ui.memory().request_kb_focus(id);
             if let Some(mouse_pos) = ui.input().mouse.pos {
                 state.cursor = Some(galley.char_at(mouse_pos - interact.rect.min).char_idx);
             }
+        } else if ui.input().mouse.click {
+            // User clicked somewhere else
+            ui.memory().surrender_kb_focus(id);
         }
+
         if interact.hovered {
             ui.output().cursor_icon = CursorIcon::Text;
         }
-        let has_kb_focus = ui.has_kb_focus(id);
 
-        if has_kb_focus {
+        if ui.memory().has_kb_focus(id) {
             let mut cursor = state.cursor.unwrap_or_else(|| text.chars().count());
             cursor = clamp(cursor, 0..=text.chars().count());
 
@@ -141,10 +145,15 @@ impl<'t> Widget for TextEdit<'t> {
             });
         }
 
-        if has_kb_focus {
+        if ui.memory().has_kb_focus(id) {
             let cursor_blink_hz = ui.style().cursor_blink_hz;
-            let show_cursor =
-                (ui.input().time * cursor_blink_hz as f64 * 3.0).floor() as i64 % 3 != 0;
+            let show_cursor = if let Some(cursor_blink_hz) = cursor_blink_hz {
+                ui.ctx().request_repaint(); // TODO: only when cursor blinks on or off
+                (ui.input().time * cursor_blink_hz as f64 * 3.0).floor() as i64 % 3 != 0
+            } else {
+                true
+            };
+
             if show_cursor {
                 if let Some(cursor) = state.cursor {
                     let cursor_pos = interact.rect.min + galley.char_start_pos(cursor);
@@ -155,11 +164,10 @@ impl<'t> Widget for TextEdit<'t> {
                     ));
                 }
             }
-            ui.ctx().request_repaint(); // TODO: only when cursor blinks on or off
         }
 
         let text_color = text_color.unwrap_or_else(|| ui.style().text_color);
-        painter.add_galley(interact.rect.min, galley, text_style, text_color);
+        painter.galley(interact.rect.min, galley, text_style, text_color);
         ui.memory().text_edit.insert(id, state);
         interact
     }

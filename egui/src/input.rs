@@ -151,6 +151,7 @@ impl Default for MouseInput {
     }
 }
 
+/// An input event. Only covers events used by Egui.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Event {
     Copy,
@@ -164,6 +165,7 @@ pub enum Event {
     },
 }
 
+/// Keyboard key name. Only covers keys used by Egui.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Key {
     Alt,
@@ -214,6 +216,32 @@ impl InputState {
             || self.mouse.delta != Vec2::zero()
             || self.scroll_delta != Vec2::zero()
             || !self.events.is_empty()
+    }
+
+    /// Was the given key pressed this frame?
+    pub fn key_pressed(&self, desired_key: Key) -> bool {
+        self.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Key {
+                    key,
+                    pressed: true
+                } if *key == desired_key
+            )
+        })
+    }
+
+    /// Was the given key released this frame?
+    pub fn key_released(&self, desired_key: Key) -> bool {
+        self.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Key {
+                    key,
+                    pressed: false
+                } if *key == desired_key
+            )
+        })
     }
 }
 

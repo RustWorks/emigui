@@ -4,7 +4,7 @@ use crate::{math::Rect, paint::PaintCmd, Id};
 
 /// Different layer categories
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Order {
     /// Painted behind all floating windows
     Background,
@@ -19,7 +19,7 @@ pub enum Order {
 /// An identifier for a paint layer.
 /// Also acts as an identifier for `Area`:s.
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Layer {
     pub order: Order,
     pub id: Id,
@@ -34,6 +34,7 @@ impl Layer {
     }
 }
 
+/// A unique identifier of a specific `PaintCmd` in a `PaintList`.
 #[derive(Clone, Copy, PartialEq)]
 pub struct PaintCmdIdx(usize);
 
@@ -54,6 +55,12 @@ impl PaintList {
     }
 
     /// Modify an existing command.
+    ///
+    /// Sometimes you want to paint a frame behind some contents, but don't know how large the frame needs to be
+    /// until the contents have been added, and therefor also painted to the `PaintList`.
+    ///
+    /// The solution is to allocate a `PaintCmd` using `let idx = paint_list.add(cr, PaintCmd::Noop);`
+    /// and then later setting it using `paint_list.set(idx, cr, frame);`.
     pub fn set(&mut self, idx: PaintCmdIdx, clip_rect: Rect, cmd: PaintCmd) {
         assert!(idx.0 < self.0.len());
         self.0[idx.0] = (clip_rect, cmd);

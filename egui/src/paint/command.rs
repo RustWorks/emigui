@@ -10,9 +10,9 @@ pub enum PaintCmd {
     Noop,
     Circle {
         center: Pos2,
+        radius: f32,
         fill: Option<Color>,
         outline: Option<LineStyle>,
-        radius: f32,
     },
     LineSegment {
         points: [Pos2; 2],
@@ -48,10 +48,28 @@ impl PaintCmd {
             style: LineStyle::new(width, color),
         }
     }
+
+    pub fn circle_filled(center: Pos2, radius: f32, fill_color: Color) -> Self {
+        Self::Circle {
+            center,
+            radius,
+            fill: Some(fill_color),
+            outline: None,
+        }
+    }
+
+    pub fn circle_outline(center: Pos2, radius: f32, outline: LineStyle) -> Self {
+        Self::Circle {
+            center,
+            radius,
+            fill: None,
+            outline: Some(outline),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct LineStyle {
     pub width: f32,
     pub color: Color,

@@ -5,7 +5,7 @@ use crate::{color::*, math::*, paint::LineStyle, types::*};
 // TODO: split into Spacing and Style?
 /// Specifies the look and feel of a `Ui`.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Style {
     /// Horizontal and vertical padding within a window frame.
     pub window_padding: Vec2,
@@ -50,7 +50,8 @@ pub struct Style {
     /// e.g. the background of the slider or text edit
     pub dark_bg_color: Color,
 
-    pub cursor_blink_hz: f32,
+    /// Blink text cursor by this frequency. If None, always show the cursor.
+    pub cursor_blink_hz: Option<f32>,
     pub text_cursor_width: f32,
 
     // TODO: add ability to disable animations!
@@ -87,7 +88,7 @@ impl Default for Style {
             thin_outline: LineStyle::new(0.5, GRAY),
             background_fill: gray(32, 250),
             dark_bg_color: gray(0, 140),
-            cursor_blink_hz: 1.0,
+            cursor_blink_hz: None, // Some(1.0)
             text_cursor_width: 2.0,
             animation_time: 1.0 / 15.0,
             window: Window::default(),
@@ -100,7 +101,7 @@ impl Default for Style {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Interact {
     pub active: WidgetStyle,
     pub hovered: WidgetStyle,
@@ -149,10 +150,10 @@ impl Default for Interact {
 
 impl Interact {
     pub fn style(&self, interact: &InteractInfo) -> &WidgetStyle {
-        if interact.sense == Sense::nothing() {
-            &self.disabled
-        } else if interact.active {
+        if interact.active || interact.has_kb_focus {
             &self.active
+        } else if interact.sense == Sense::nothing() {
+            &self.disabled
         } else if interact.hovered {
             &self.hovered
         } else {
@@ -162,7 +163,7 @@ impl Interact {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct WidgetStyle {
     /// Background color of widget
     pub bg_fill: Option<Color>,
@@ -186,7 +187,7 @@ pub struct WidgetStyle {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Window {
     pub corner_radius: f32,
 }
@@ -200,7 +201,7 @@ impl Default for Window {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "with_serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct MenuBar {
     pub height: f32,
 }

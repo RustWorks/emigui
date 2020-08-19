@@ -4,7 +4,7 @@ use crate::{paint::*, widgets::*, *};
 
 use super::*;
 
-/// A wrapper around other containers for things you often want in a window
+/// A floating window which can be moved, closed, collapsed, resized and scrolled.
 pub struct Window<'open> {
     pub title_label: Label,
     open: Option<&'open mut bool>,
@@ -12,6 +12,7 @@ pub struct Window<'open> {
     pub frame: Option<Frame>,
     pub resize: Resize,
     pub scroll: Option<ScrollArea>,
+    pub collapsible: bool,
 }
 
 impl<'open> Window<'open> {
@@ -36,6 +37,7 @@ impl<'open> Window<'open> {
                     .always_show_scroll(false)
                     .max_height(f32::INFINITY),
             ), // As large as we can be
+            collapsible: true,
         }
     }
 
@@ -91,6 +93,12 @@ impl<'open> Window<'open> {
         self.default_pos(rect.min).default_size(rect.size())
     }
 
+    /// Positions the window and prevents it from being moved
+    pub fn fixed_pos(mut self, pos: impl Into<Pos2>) -> Self {
+        self.area = self.area.fixed_pos(pos);
+        self
+    }
+
     pub fn fixed_size(mut self, size: impl Into<Vec2>) -> Self {
         self.resize = self.resize.fixed_size(size);
         self
@@ -100,6 +108,12 @@ impl<'open> Window<'open> {
     /// Note that a window can still auto-resize
     pub fn resizable(mut self, resizable: bool) -> Self {
         self.resize = self.resize.resizable(resizable);
+        self
+    }
+
+    /// Can the window be collapsed by clicking on its title?
+    pub fn collapsible(mut self, collapsible: bool) -> Self {
+        self.collapsible = collapsible;
         self
     }
 
@@ -139,6 +153,7 @@ impl<'open> Window<'open> {
             frame,
             resize,
             scroll,
+            collapsible,
         } = self;
 
         if matches!(open, Some(false)) {
@@ -213,6 +228,7 @@ impl<'open> Window<'open> {
                 show_close_button,
                 collapsing_id,
                 &mut collapsing,
+                collapsible,
             );
 
             let content_rect = collapsing
@@ -239,6 +255,7 @@ impl<'open> Window<'open> {
                 content_rect,
                 open,
                 &mut collapsing,
+                collapsible,
             );
 
             area_content_ui
@@ -534,6 +551,7 @@ fn show_title_bar(
     show_close_button: bool,
     collapsing_id: Id,
     collapsing: &mut collapsing_header::State,
+    collapsible: bool,
 ) -> TitleBar {
     let title_bar_and_rect = ui.inner_layout(Layout::horizontal(Align::Center), |ui| {
         ui.set_desired_height(title_label.font_height(ui.fonts()));
@@ -541,7 +559,7 @@ fn show_title_bar(
         let item_spacing = ui.style().item_spacing;
         let button_size = ui.style().start_icon_width;
 
-        {
+        if collapsible {
             // TODO: make clickable radius larger
             ui.allocate_space(vec2(0.0, 0.0)); // HACK: will add left spacing
 
@@ -592,6 +610,7 @@ impl TitleBar {
         content_rect: Option<Rect>,
         open: Option<&mut bool>,
         collapsing: &mut collapsing_header::State,
+        collapsible: bool,
     ) {
         if let Some(content_rect) = content_rect {
             // Now we know how large we got to be:
@@ -624,6 +643,7 @@ impl TitleBar {
         if ui
             .interact(self.rect, title_bar_id, Sense::click())
             .double_clicked
+            && collapsible
         {
             collapsing.toggle(ui);
         }
