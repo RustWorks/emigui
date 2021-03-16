@@ -1,134 +1,347 @@
+use crate::{window_settings::WindowSettings, *};
+use egui::Color32;
 use std::time::Instant;
 
-use crate::{
-    storage::{FileStorage, WindowSettings},
-    *,
-};
-
-pub use egui::app::{App, Backend, RunMode, Storage};
-
+#[cfg(feature = "persistence")]
 const EGUI_MEMORY_KEY: &str = "egui";
+#[cfg(feature = "persistence")]
 const WINDOW_KEY: &str = "window";
 
-pub struct GliumBackend {
-    frame_times: egui::MovementTracker<f32>,
-    quit: bool,
-    run_mode: RunMode,
+#[cfg(feature = "persistence")]
+fn deserialize_window_settings(storage: &Option<Box<dyn epi::Storage>>) -> Option<WindowSettings> {
+    epi::get_value(&**storage.as_ref()?, WINDOW_KEY)
 }
 
-impl GliumBackend {
-    pub fn new(run_mode: RunMode) -> Self {
-        Self {
-            frame_times: egui::MovementTracker::new(1000, 1.0),
-            quit: false,
-            run_mode,
-        }
+#[cfg(not(feature = "persistence"))]
+fn deserialize_window_settings(_: &Option<Box<dyn epi::Storage>>) -> Option<WindowSettings> {
+    None
+}
+
+#[cfg(feature = "persistence")]
+fn deserialize_memory(storage: &Option<Box<dyn epi::Storage>>) -> Option<egui::Memory> {
+    epi::get_value(&**storage.as_ref()?, EGUI_MEMORY_KEY)
+}
+
+#[cfg(not(feature = "persistence"))]
+fn deserialize_memory(_: &Option<Box<dyn epi::Storage>>) -> Option<egui::Memory> {
+    None
+}
+
+impl epi::TextureAllocator for Painter {
+    fn alloc_srgba_premultiplied(
+        &mut self,
+        size: (usize, usize),
+        srgba_pixels: &[Color32],
+    ) -> egui::TextureId {
+        let id = self.alloc_user_texture();
+        self.set_user_texture(id, size, srgba_pixels);
+        id
+    }
+
+    fn free(&mut self, id: egui::TextureId) {
+        self.free_user_texture(id)
     }
 }
 
-impl Backend for GliumBackend {
-    fn run_mode(&self) -> RunMode {
-        self.run_mode
-    }
+struct RequestRepaintEvent;
 
-    fn set_run_mode(&mut self, run_mode: RunMode) {
-        self.run_mode = run_mode;
-    }
+struct GliumRepaintSignal(
+    std::sync::Mutex<glutin::event_loop::EventLoopProxy<RequestRepaintEvent>>,
+);
 
-    fn cpu_time(&self) -> f32 {
-        self.frame_times.average().unwrap_or_default()
-    }
-
-    fn fps(&self) -> f32 {
-        1.0 / self.frame_times.mean_time_interval().unwrap_or_default()
-    }
-
-    fn quit(&mut self) {
-        self.quit = true;
+impl epi::RepaintSignal for GliumRepaintSignal {
+    fn request_repaint(&self) {
+        self.0.lock().unwrap().send_event(RequestRepaintEvent).ok();
     }
 }
 
-/// Run an egui app
-pub fn run(
+fn create_display(
     title: &str,
-    run_mode: RunMode,
-    mut storage: FileStorage,
-    mut app: impl App + 'static,
-) -> ! {
-    let event_loop = glutin::event_loop::EventLoop::new();
-    let mut window = glutin::window::WindowBuilder::new()
+    initial_size_points: Option<Vec2>,
+    window_settings: Option<WindowSettings>,
+    is_resizable: bool,
+    window_icon: Option<glutin::window::Icon>,
+    event_loop: &glutin::event_loop::EventLoop<RequestRepaintEvent>,
+) -> glium::Display {
+    let mut window_builder = glutin::window::WindowBuilder::new()
         .with_decorations(true)
-        .with_resizable(true)
+        .with_resizable(is_resizable)
         .with_title(title)
+        .with_window_icon(window_icon)
         .with_transparent(false);
 
-    let window_settings: Option<WindowSettings> = egui::app::get_value(&storage, WINDOW_KEY);
     if let Some(window_settings) = &window_settings {
-        window = window_settings.initialize_size(window);
+        window_builder = window_settings.initialize_size(window_builder);
+    } else if let Some(initial_size_points) = initial_size_points {
+        window_builder = window_builder.with_inner_size(glutin::dpi::LogicalSize {
+            width: initial_size_points.x as f64,
+            height: initial_size_points.y as f64,
+        });
     }
 
-    let context = glutin::ContextBuilder::new()
+    let context_builder = glutin::ContextBuilder::new()
         .with_depth_buffer(0)
         .with_srgb(true)
         .with_stencil_buffer(0)
         .with_vsync(true);
-    let display = glium::Display::new(window, context, &event_loop).unwrap();
+
+    let display = glium::Display::new(window_builder, context_builder, &event_loop).unwrap();
 
     if let Some(window_settings) = &window_settings {
         window_settings.restore_positions(&display);
     }
 
-    let mut ctx = egui::Context::new();
-    *ctx.memory() = egui::app::get_value(&storage, EGUI_MEMORY_KEY).unwrap_or_default();
+    display
+}
 
-    let mut painter = Painter::new(&display);
-    let mut raw_input = make_raw_input(&display);
+#[cfg(not(feature = "persistence"))]
+fn create_storage(_app_name: &str) -> Option<Box<dyn epi::Storage>> {
+    None
+}
 
-    // used to keep track of time for animations
+#[cfg(feature = "persistence")]
+fn create_storage(app_name: &str) -> Option<Box<dyn epi::Storage>> {
+    if let Some(proj_dirs) = directories_next::ProjectDirs::from("", "", app_name) {
+        let data_dir = proj_dirs.data_dir().to_path_buf();
+        if let Err(err) = std::fs::create_dir_all(&data_dir) {
+            eprintln!(
+                "Saving disabled: Failed to create app path at {:?}: {}",
+                data_dir, err
+            );
+            None
+        } else {
+            let mut config_dir = data_dir;
+            config_dir.push("app.json");
+            let storage = crate::persistence::FileStorage::from_path(config_dir);
+            Some(Box::new(storage))
+        }
+    } else {
+        eprintln!("Saving disabled: Failed to find path to data_dir.");
+        None
+    }
+}
+
+fn integration_info(
+    display: &glium::Display,
+    previous_frame_time: Option<f32>,
+) -> epi::IntegrationInfo {
+    epi::IntegrationInfo {
+        web_info: None,
+        cpu_usage: previous_frame_time,
+        seconds_since_midnight: seconds_since_midnight(),
+        native_pixels_per_point: Some(native_pixels_per_point(&display)),
+    }
+}
+
+fn load_icon(icon_data: Option<epi::IconData>) -> Option<glutin::window::Icon> {
+    let icon_data = icon_data?;
+    glutin::window::Icon::from_rgba(icon_data.rgba, icon_data.width, icon_data.height).ok()
+}
+
+/// Run an egui app
+pub fn run(mut app: Box<dyn epi::App>) -> ! {
+    let mut storage = create_storage(app.name());
+
+    if let Some(storage) = &mut storage {
+        app.load(storage.as_ref());
+    }
+
+    let window_settings = deserialize_window_settings(&storage);
+    let event_loop = glutin::event_loop::EventLoop::with_user_event();
+    let icon = load_icon(app.icon_data());
+    let display = create_display(
+        app.name(),
+        app.initial_window_size(),
+        window_settings,
+        app.is_resizable(),
+        icon,
+        &event_loop,
+    );
+
+    let repaint_signal = std::sync::Arc::new(GliumRepaintSignal(std::sync::Mutex::new(
+        event_loop.create_proxy(),
+    )));
+
+    let mut ctx = egui::CtxRef::default();
+    *ctx.memory() = deserialize_memory(&storage).unwrap_or_default();
+
+    app.setup(&ctx);
+
+    let mut input_state = GliumInputState::from_pixels_per_point(native_pixels_per_point(&display));
+
     let start_time = Instant::now();
-    let mut runner = GliumBackend::new(run_mode);
+    let mut previous_frame_time = None;
+    let mut painter = Painter::new(&display);
     let mut clipboard = init_clipboard();
+    let mut current_cursor_icon = CursorIcon::Default;
+
+    #[cfg(feature = "persistence")]
+    let mut last_auto_save = Instant::now();
+
+    #[cfg(feature = "http")]
+    let http = std::sync::Arc::new(crate::http::GliumHttp {});
+
+    let mut screen_reader = crate::screen_reader::ScreenReader::default();
+
+    if app.warm_up_enabled() {
+        // let warm_up_start = Instant::now();
+        input_state.raw.time = Some(0.0);
+        input_state.raw.screen_rect = Some(Rect::from_min_size(
+            Default::default(),
+            screen_size_in_pixels(&display) / input_state.raw.pixels_per_point.unwrap(),
+        ));
+        ctx.begin_frame(input_state.raw.take());
+        let mut app_output = epi::backend::AppOutput::default();
+        let mut frame = epi::backend::FrameBuilder {
+            info: integration_info(&display, None),
+            tex_allocator: &mut painter,
+            #[cfg(feature = "http")]
+            http: http.clone(),
+            output: &mut app_output,
+            repaint_signal: repaint_signal.clone(),
+        }
+        .build();
+
+        let saved_memory = ctx.memory().clone();
+        ctx.memory().set_everything_is_visible(true);
+        app.update(&ctx, &mut frame);
+        *ctx.memory() = saved_memory; // We don't want to remember that windows were huge.
+        ctx.clear_animations();
+
+        let (egui_output, _shapes) = ctx.end_frame();
+
+        set_cursor_icon(&display, egui_output.cursor_icon);
+        current_cursor_icon = egui_output.cursor_icon;
+        handle_output(egui_output, clipboard.as_mut());
+
+        // TODO: handle app_output
+        // eprintln!("Warmed up in {} ms", warm_up_start.elapsed().as_millis())
+    }
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = glutin::event_loop::ControlFlow::Wait;
+        let mut redraw = || {
+            let pixels_per_point = input_state
+                .raw
+                .pixels_per_point
+                .unwrap_or_else(|| ctx.pixels_per_point());
 
-        match event {
-            glutin::event::Event::RedrawRequested(_) => {
-                let egui_start = Instant::now();
-                raw_input.time = start_time.elapsed().as_nanos() as f64 * 1e-9;
-                raw_input.seconds_since_midnight = Some(local_time_of_day());
+            let frame_start = Instant::now();
+            input_state.raw.time = Some(start_time.elapsed().as_nanos() as f64 * 1e-9);
+            input_state.raw.screen_rect = Some(Rect::from_min_size(
+                Default::default(),
+                screen_size_in_pixels(&display) / pixels_per_point,
+            ));
 
-                let mut ui = ctx.begin_frame(raw_input.take());
-                app.ui(&mut ui, &mut runner);
-                let (output, paint_jobs) = ctx.end_frame();
+            ctx.begin_frame(input_state.raw.take());
+            let mut app_output = epi::backend::AppOutput::default();
+            let mut frame = epi::backend::FrameBuilder {
+                info: integration_info(&display, previous_frame_time),
+                tex_allocator: &mut painter,
+                #[cfg(feature = "http")]
+                http: http.clone(),
+                output: &mut app_output,
+                repaint_signal: repaint_signal.clone(),
+            }
+            .build();
+            app.update(&ctx, &mut frame);
+            let (egui_output, shapes) = ctx.end_frame();
+            let clipped_meshes = ctx.tessellate(shapes);
 
-                let frame_time = (Instant::now() - egui_start).as_secs_f64() as f32;
-                runner.frame_times.add(raw_input.time, frame_time);
+            let frame_time = (Instant::now() - frame_start).as_secs_f64() as f32;
+            previous_frame_time = Some(frame_time);
+            painter.paint_meshes(
+                &display,
+                ctx.pixels_per_point(),
+                app.clear_color(),
+                clipped_meshes,
+                &ctx.texture(),
+            );
 
-                painter.paint_jobs(&display, paint_jobs, ctx.texture());
+            {
+                let epi::backend::AppOutput { quit, window_size } = app_output;
 
-                if runner.quit {
-                    *control_flow = glutin::event_loop::ControlFlow::Exit
-                } else if runner.run_mode() == RunMode::Continuous || output.needs_repaint {
-                    display.gl_window().window().request_redraw();
+                if let Some(window_size) = window_size {
+                    display.gl_window().window().set_inner_size(
+                        glutin::dpi::PhysicalSize {
+                            width: (ctx.pixels_per_point() * window_size.x).round(),
+                            height: (ctx.pixels_per_point() * window_size.y).round(),
+                        }
+                        .to_logical::<f32>(native_pixels_per_point(&display) as f64),
+                    );
                 }
 
-                handle_output(output, &display, clipboard.as_mut());
+                *control_flow = if quit {
+                    glutin::event_loop::ControlFlow::Exit
+                } else if egui_output.needs_repaint {
+                    display.gl_window().window().request_redraw();
+                    glutin::event_loop::ControlFlow::Poll
+                } else {
+                    glutin::event_loop::ControlFlow::Wait
+                };
             }
+
+            screen_reader.speak(&egui_output.events_description());
+            if current_cursor_icon != egui_output.cursor_icon {
+                // call only when changed to prevent flickering near frame boundary
+                // when Windows OS tries to control cursor icon for window resizing
+                set_cursor_icon(&display, egui_output.cursor_icon);
+                current_cursor_icon = egui_output.cursor_icon;
+            }
+            handle_output(egui_output, clipboard.as_mut());
+
+            #[cfg(feature = "persistence")]
+            if let Some(storage) = &mut storage {
+                let now = Instant::now();
+                if now - last_auto_save > app.auto_save_interval() {
+                    epi::set_value(
+                        storage.as_mut(),
+                        WINDOW_KEY,
+                        &WindowSettings::from_display(&display),
+                    );
+                    epi::set_value(storage.as_mut(), EGUI_MEMORY_KEY, &*ctx.memory());
+                    app.save(storage.as_mut());
+                    storage.flush();
+                    last_auto_save = now;
+                }
+            }
+        };
+
+        match event {
+            // Platform-dependent event handlers to workaround a winit bug
+            // See: https://github.com/rust-windowing/winit/issues/987
+            // See: https://github.com/rust-windowing/winit/issues/1619
+            glutin::event::Event::RedrawEventsCleared if cfg!(windows) => redraw(),
+            glutin::event::Event::RedrawRequested(_) if !cfg!(windows) => redraw(),
+
             glutin::event::Event::WindowEvent { event, .. } => {
-                input_to_egui(event, clipboard.as_mut(), &mut raw_input, control_flow);
-                display.gl_window().window().request_redraw(); // TODO: maybe only on some events?
+                input_to_egui(
+                    ctx.pixels_per_point(),
+                    event,
+                    clipboard.as_mut(),
+                    &mut input_state,
+                    control_flow,
+                );
+                display.gl_window().window().request_redraw(); // TODO: ask egui if the events warrants a repaint instead
             }
             glutin::event::Event::LoopDestroyed => {
-                egui::app::set_value(
-                    &mut storage,
-                    WINDOW_KEY,
-                    &WindowSettings::from_display(&display),
-                );
-                egui::app::set_value(&mut storage, EGUI_MEMORY_KEY, &*ctx.memory());
-                app.on_exit(&mut storage);
-                storage.save();
+                app.on_exit();
+                #[cfg(feature = "persistence")]
+                if let Some(storage) = &mut storage {
+                    epi::set_value(
+                        storage.as_mut(),
+                        WINDOW_KEY,
+                        &WindowSettings::from_display(&display),
+                    );
+                    epi::set_value(storage.as_mut(), EGUI_MEMORY_KEY, &*ctx.memory());
+                    app.save(storage.as_mut());
+                    storage.flush();
+                }
             }
+
+            glutin::event::Event::UserEvent(RequestRepaintEvent) => {
+                display.gl_window().window().request_redraw();
+            }
+
             _ => (),
         }
     });

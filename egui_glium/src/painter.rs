@@ -2,291 +2,326 @@
 
 use {
     egui::{
-        math::clamp,
-        paint::{PaintJobs, Triangles},
-        Rect,
+        emath::{clamp, Rect},
+        epaint::{Color32, Mesh},
     },
-    glium::{implement_vertex, index::PrimitiveType, program, texture, uniform, Frame, Surface},
+    glium::{
+        implement_vertex,
+        index::PrimitiveType,
+        program,
+        texture::{self, srgb_texture2d::SrgbTexture2d},
+        uniform,
+        uniforms::{MagnifySamplerFilter, SamplerWrapFunction},
+        Frame, Surface,
+    },
 };
 
 pub struct Painter {
     program: glium::Program,
-    texture: texture::texture2d::Texture2d,
-    current_texture_id: Option<u64>,
+    egui_texture: Option<SrgbTexture2d>,
+    egui_texture_version: Option<u64>,
+
+    /// `None` means unallocated (freed) slot.
+    user_textures: Vec<Option<UserTexture>>,
+}
+
+#[derive(Default)]
+struct UserTexture {
+    /// Pending upload (will be emptied later).
+    /// This is the format glium likes.
+    pixels: Vec<Vec<(u8, u8, u8, u8)>>,
+
+    /// Lazily uploaded
+    gl_texture: Option<SrgbTexture2d>,
 }
 
 impl Painter {
     pub fn new(facade: &dyn glium::backend::Facade) -> Painter {
-        let program = program!(facade,
+        let program = program! {
+            facade,
+            120 => {
+                vertex: include_str!("shader/vertex_120.glsl"),
+                fragment: include_str!("shader/fragment_120.glsl"),
+            },
             140 => {
-                    vertex: "
-                        #version 140
-                        uniform vec2 u_screen_size;
-                        uniform vec2 u_tex_size;
-                        in vec2 a_pos;
-                        in vec4 a_color;
-                        in vec2 a_tc;
-                        out vec4 v_color;
-                        out vec2 v_tc;
-                        void main() {
-                            gl_Position = vec4(
-                                2.0 * a_pos.x / u_screen_size.x - 1.0,
-                                1.0 - 2.0 * a_pos.y / u_screen_size.y,
-                                0.0,
-                                1.0);
-                            v_color = a_color / 255.0;
-                            v_tc = a_tc / u_tex_size;
-                        }
-                    ",
-
-                    fragment: "
-                        #version 140
-                        uniform sampler2D u_sampler;
-                        in vec4 v_color;
-                        in vec2 v_tc;
-                        out vec4 f_color;
-
-                        // glium expects linear output.
-                        vec3 linear_from_srgb(vec3 srgb) {
-                            bvec3 cutoff = lessThan(srgb, vec3(0.04045));
-                            vec3 higher = pow((srgb + vec3(0.055)) / vec3(1.055), vec3(2.4));
-                            vec3 lower = srgb / vec3(12.92);
-                            return mix(higher, lower, cutoff);
-                        }
-
-                        void main() {
-                            f_color = v_color;
-                            f_color.rgb = linear_from_srgb(f_color.rgb);
-                            f_color *= texture(u_sampler, v_tc).r;
-                        }
-                    "
+                vertex: include_str!("shader/vertex_140.glsl"),
+                fragment: include_str!("shader/fragment_140.glsl"),
             },
-
-            110 => {
-                    vertex: "
-                        #version 110
-                        uniform vec2 u_screen_size;
-                        uniform vec2 u_tex_size;
-                        attribute vec2 a_pos;
-                        attribute vec4 a_color;
-                        attribute vec2 a_tc;
-                        varying vec4 v_color;
-                        varying vec2 v_tc;
-                        void main() {
-                            gl_Position = vec4(
-                                2.0 * a_pos.x / u_screen_size.x - 1.0,
-                                1.0 - 2.0 * a_pos.y / u_screen_size.y,
-                                0.0,
-                                1.0);
-                            v_color = a_color / 255.0;
-                            v_tc = a_tc / u_tex_size;
-                        }
-                    ",
-
-                    fragment: "
-                        #version 110
-                        uniform sampler2D u_sampler;
-                        varying vec4 v_color;
-                        varying vec2 v_tc;
-
-                        // glium expects linear output.
-                        vec3 linear_from_srgb(vec3 srgb) {
-                            bvec3 cutoff = lessThan(srgb, vec3(0.04045));
-                            vec3 higher = pow((srgb + vec3(0.055)) / vec3(1.055), vec3(2.4));
-                            vec3 lower = srgb / vec3(12.92);
-                            return mix(higher, lower, cutoff);
-                        }
-
-                        void main() {
-                            gl_FragColor = v_color;
-                            gl_FragColor.rgb = linear_from_srgb(gl_FragColor.rgb);
-                            gl_FragColor *= texture2D(u_sampler, v_tc).r;
-                        }
-                    ",
+            100 es => {
+                vertex: include_str!("shader/vertex_100es.glsl"),
+                fragment: include_str!("shader/fragment_100es.glsl"),
             },
-
-            100 => {
-                    vertex: "
-                        #version 100
-                        uniform mediump vec2 u_screen_size;
-                        uniform mediump vec2 u_tex_size;
-                        attribute mediump vec2 a_pos;
-                        attribute mediump vec4 a_color;
-                        attribute mediump vec2 a_tc;
-                        varying mediump vec4 v_color;
-                        varying mediump vec2 v_tc;
-                        void main() {
-                            gl_Position = vec4(
-                                2.0 * a_pos.x / u_screen_size.x - 1.0,
-                                1.0 - 2.0 * a_pos.y / u_screen_size.y,
-                                0.0,
-                                1.0);
-                            v_color = a_color / 255.0;
-                            v_tc = a_tc / u_tex_size;
-                        }
-                    ",
-
-                    fragment: "
-                        #version 100
-                        uniform sampler2D u_sampler;
-                        varying mediump vec4 v_color;
-                        varying mediump vec2 v_tc;
-
-                        // glium expects linear output.
-                        vec3 linear_from_srgb(vec3 srgb) {
-                            bvec3 cutoff = lessThan(srgb, vec3(0.04045));
-                            vec3 higher = pow((srgb + vec3(0.055)) / vec3(1.055), vec3(2.4));
-                            vec3 lower = srgb / vec3(12.92);
-                            return mix(higher, lower, cutoff);
-                        }
-
-                        void main() {
-                            gl_FragColor = v_color;
-                            gl_FragColor.rgb = linear_from_srgb(gl_FragColor.rgb);
-                            gl_FragColor *= texture2D(u_sampler, v_tc).r;
-                        }
-                    ",
+            300 es => {
+                vertex: include_str!("shader/vertex_300es.glsl"),
+                fragment: include_str!("shader/fragment_300es.glsl"),
             },
-        )
-        .unwrap();
-
-        let pixels = vec![vec![255u8, 0u8], vec![0u8, 255u8]];
-        let format = texture::UncompressedFloatFormat::U8;
-        let mipmaps = texture::MipmapsOption::NoMipmap;
-        let texture =
-            texture::texture2d::Texture2d::with_format(facade, pixels, format, mipmaps).unwrap();
+        }
+        .expect("Failed to compile shader");
 
         Painter {
             program,
-            texture,
-            current_texture_id: None,
+            egui_texture: None,
+            egui_texture_version: None,
+            user_textures: Default::default(),
         }
     }
 
-    fn upload_texture(&mut self, facade: &dyn glium::backend::Facade, texture: &egui::Texture) {
-        if self.current_texture_id == Some(texture.id) {
+    pub fn upload_egui_texture(
+        &mut self,
+        facade: &dyn glium::backend::Facade,
+        texture: &egui::Texture,
+    ) {
+        if self.egui_texture_version == Some(texture.version) {
             return; // No change
         }
 
-        let pixels: Vec<Vec<u8>> = texture
+        let pixels: Vec<Vec<(u8, u8, u8, u8)>> = texture
             .pixels
             .chunks(texture.width as usize)
-            .map(|row| row.to_vec())
+            .map(|row| {
+                row.iter()
+                    .map(|&a| Color32::from_white_alpha(a).to_tuple())
+                    .collect()
+            })
             .collect();
 
-        let format = texture::UncompressedFloatFormat::U8;
+        let format = texture::SrgbFormat::U8U8U8U8;
         let mipmaps = texture::MipmapsOption::NoMipmap;
-        self.texture =
-            texture::texture2d::Texture2d::with_format(facade, pixels, format, mipmaps).unwrap();
-        self.current_texture_id = Some(texture.id);
+        self.egui_texture =
+            Some(SrgbTexture2d::with_format(facade, pixels, format, mipmaps).unwrap());
+        self.egui_texture_version = Some(texture.version);
     }
 
-    pub fn paint_jobs(
+    /// Main entry-point for painting a frame
+    pub fn paint_meshes(
         &mut self,
         display: &glium::Display,
-        jobs: PaintJobs,
-        texture: &egui::Texture,
+        pixels_per_point: f32,
+        clear_color: egui::Rgba,
+        cipped_meshes: Vec<egui::ClippedMesh>,
+        egui_texture: &egui::Texture,
     ) {
-        self.upload_texture(display, texture);
+        self.upload_egui_texture(display, egui_texture);
+        self.upload_pending_user_textures(display);
 
         let mut target = display.draw();
-        target.clear_color(0.0, 0.0, 0.0, 0.0);
-        for (clip_rect, triangles) in jobs {
-            self.paint_job(&mut target, display, clip_rect, &triangles, texture)
+        // Verified to be gamma-correct.
+        target.clear_color(
+            clear_color[0],
+            clear_color[1],
+            clear_color[2],
+            clear_color[3],
+        );
+        for egui::ClippedMesh(clip_rect, mesh) in cipped_meshes {
+            self.paint_mesh(&mut target, display, pixels_per_point, clip_rect, &mesh)
         }
         target.finish().unwrap();
     }
 
     #[inline(never)] // Easier profiling
-    fn paint_job(
+    pub fn paint_mesh(
         &mut self,
         target: &mut Frame,
         display: &glium::Display,
+        pixels_per_point: f32,
         clip_rect: Rect,
-        triangles: &Triangles,
-        texture: &egui::Texture,
+        mesh: &Mesh,
     ) {
+        debug_assert!(mesh.is_valid());
+
         let vertex_buffer = {
             #[derive(Copy, Clone)]
             struct Vertex {
                 a_pos: [f32; 2],
-                a_color: [u8; 4],
-                a_tc: [u16; 2],
+                a_tc: [f32; 2],
+                a_srgba: [u8; 4],
             }
-            implement_vertex!(Vertex, a_pos, a_color, a_tc);
+            implement_vertex!(Vertex, a_pos, a_tc, a_srgba);
 
-            let vertices: Vec<Vertex> = triangles
+            let vertices: Vec<Vertex> = mesh
                 .vertices
                 .iter()
                 .map(|v| Vertex {
                     a_pos: [v.pos.x, v.pos.y],
-                    a_color: [v.color.r, v.color.g, v.color.b, v.color.a],
-                    a_tc: [v.uv.0, v.uv.1],
+                    a_tc: [v.uv.x, v.uv.y],
+                    a_srgba: v.color.to_array(),
                 })
                 .collect();
 
+            // TODO: we should probably reuse the `VertexBuffer` instead of allocating a new one each frame.
             glium::VertexBuffer::new(display, &vertices).unwrap()
         };
 
-        let indices: Vec<u32> = triangles.indices.iter().map(|idx| *idx as u32).collect();
+        let indices: Vec<u32> = mesh.indices.iter().map(|idx| *idx as u32).collect();
 
+        // TODO: we should probably reuse the `IndexBuffer` instead of allocating a new one each frame.
         let index_buffer =
             glium::IndexBuffer::new(display, PrimitiveType::TrianglesList, &indices).unwrap();
 
-        let pixels_per_point = display.gl_window().window().scale_factor() as f32;
-        let (width_pixels, height_pixels) = display.get_framebuffer_dimensions();
-        let width_points = width_pixels as f32 / pixels_per_point;
-        let height_points = height_pixels as f32 / pixels_per_point;
+        let (width_in_pixels, height_in_pixels) = display.get_framebuffer_dimensions();
+        let width_in_points = width_in_pixels as f32 / pixels_per_point;
+        let height_in_points = height_in_pixels as f32 / pixels_per_point;
 
-        let uniforms = uniform! {
-            u_screen_size: [width_points, height_points],
-            u_tex_size: [texture.width as f32, texture.height as f32],
-            u_sampler: &self.texture,
-        };
+        if let Some(texture) = self.get_texture(mesh.texture_id) {
+            // The texture coordinates for text are so that both nearest and linear should work with the egui font texture.
+            // For user textures linear sampling is more likely to be the right choice.
+            let filter = MagnifySamplerFilter::Linear;
 
-        // Emilib outputs colors with premultiplied alpha:
-        let blend_func = glium::BlendingFunction::Addition {
-            source: glium::LinearBlendingFactor::One,
-            destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-        };
-        let blend = glium::Blend {
-            color: blend_func,
-            alpha: blend_func,
-            ..Default::default()
-        };
+            let uniforms = uniform! {
+                u_screen_size: [width_in_points, height_in_points],
+                u_sampler: texture.sampled().magnify_filter(filter).wrap_function(SamplerWrapFunction::Clamp),
+            };
 
-        let clip_min_x = pixels_per_point * clip_rect.min.x;
-        let clip_min_y = pixels_per_point * clip_rect.min.y;
-        let clip_max_x = pixels_per_point * clip_rect.max.x;
-        let clip_max_y = pixels_per_point * clip_rect.max.y;
-        let clip_min_x = clamp(clip_min_x, 0.0..=width_pixels as f32);
-        let clip_min_y = clamp(clip_min_y, 0.0..=height_pixels as f32);
-        let clip_max_x = clamp(clip_max_x, clip_min_x..=width_pixels as f32);
-        let clip_max_y = clamp(clip_max_y, clip_min_y..=height_pixels as f32);
-        let clip_min_x = clip_min_x.round() as u32;
-        let clip_min_y = clip_min_y.round() as u32;
-        let clip_max_x = clip_max_x.round() as u32;
-        let clip_max_y = clip_max_y.round() as u32;
+            // egui outputs colors with premultiplied alpha:
+            let color_blend_func = glium::BlendingFunction::Addition {
+                source: glium::LinearBlendingFactor::One,
+                destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
+            };
 
-        let params = glium::DrawParameters {
-            blend,
-            scissor: Some(glium::Rect {
-                left: clip_min_x,
-                bottom: height_pixels - clip_max_y,
-                width: clip_max_x - clip_min_x,
-                height: clip_max_y - clip_min_y,
-            }),
-            ..Default::default()
-        };
+            // Less important, but this is technically the correct alpha blend function
+            // when you want to make use of the framebuffer alpha (for screenshots, compositing, etc).
+            let alpha_blend_func = glium::BlendingFunction::Addition {
+                source: glium::LinearBlendingFactor::OneMinusDestinationAlpha,
+                destination: glium::LinearBlendingFactor::One,
+            };
 
-        target
-            .draw(
-                &vertex_buffer,
-                &index_buffer,
-                &self.program,
-                &uniforms,
-                &params,
-            )
-            .unwrap();
+            let blend = glium::Blend {
+                color: color_blend_func,
+                alpha: alpha_blend_func,
+                ..Default::default()
+            };
+
+            // egui outputs mesh in both winding orders:
+            let backface_culling = glium::BackfaceCullingMode::CullingDisabled;
+
+            // Transform clip rect to physical pixels:
+            let clip_min_x = pixels_per_point * clip_rect.min.x;
+            let clip_min_y = pixels_per_point * clip_rect.min.y;
+            let clip_max_x = pixels_per_point * clip_rect.max.x;
+            let clip_max_y = pixels_per_point * clip_rect.max.y;
+
+            // Make sure clip rect can fit within a `u32`:
+            let clip_min_x = clamp(clip_min_x, 0.0..=width_in_pixels as f32);
+            let clip_min_y = clamp(clip_min_y, 0.0..=height_in_pixels as f32);
+            let clip_max_x = clamp(clip_max_x, clip_min_x..=width_in_pixels as f32);
+            let clip_max_y = clamp(clip_max_y, clip_min_y..=height_in_pixels as f32);
+
+            let clip_min_x = clip_min_x.round() as u32;
+            let clip_min_y = clip_min_y.round() as u32;
+            let clip_max_x = clip_max_x.round() as u32;
+            let clip_max_y = clip_max_y.round() as u32;
+
+            let params = glium::DrawParameters {
+                blend,
+                backface_culling,
+                scissor: Some(glium::Rect {
+                    left: clip_min_x,
+                    bottom: height_in_pixels - clip_max_y,
+                    width: clip_max_x - clip_min_x,
+                    height: clip_max_y - clip_min_y,
+                }),
+                ..Default::default()
+            };
+
+            target
+                .draw(
+                    &vertex_buffer,
+                    &index_buffer,
+                    &self.program,
+                    &uniforms,
+                    &params,
+                )
+                .unwrap();
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // user textures: this is an experimental feature.
+    // No need to implement this in your egui integration!
+
+    pub fn alloc_user_texture(&mut self) -> egui::TextureId {
+        for (i, tex) in self.user_textures.iter_mut().enumerate() {
+            if tex.is_none() {
+                *tex = Some(Default::default());
+                return egui::TextureId::User(i as u64);
+            }
+        }
+        let id = egui::TextureId::User(self.user_textures.len() as u64);
+        self.user_textures.push(Some(Default::default()));
+        id
+    }
+    /// register glium texture as egui texture
+    /// Usable for render to image rectangle
+    pub fn register_glium_texture(
+        &mut self,
+        texture: glium::texture::SrgbTexture2d,
+    ) -> egui::TextureId {
+        let id = self.alloc_user_texture();
+        if let egui::TextureId::User(id) = id {
+            if let Some(Some(user_texture)) = self.user_textures.get_mut(id as usize) {
+                *user_texture = UserTexture {
+                    pixels: vec![],
+                    gl_texture: Some(texture),
+                }
+            }
+        }
+        id
+    }
+    pub fn set_user_texture(
+        &mut self,
+        id: egui::TextureId,
+        size: (usize, usize),
+        pixels: &[Color32],
+    ) {
+        assert_eq!(size.0 * size.1, pixels.len());
+
+        if let egui::TextureId::User(id) = id {
+            if let Some(Some(user_texture)) = self.user_textures.get_mut(id as usize) {
+                let pixels: Vec<Vec<(u8, u8, u8, u8)>> = pixels
+                    .chunks(size.0 as usize)
+                    .map(|row| row.iter().map(|srgba| srgba.to_tuple()).collect())
+                    .collect();
+
+                *user_texture = UserTexture {
+                    pixels,
+                    gl_texture: None,
+                };
+            }
+        }
+    }
+
+    pub fn free_user_texture(&mut self, id: egui::TextureId) {
+        if let egui::TextureId::User(id) = id {
+            let index = id as usize;
+            if index < self.user_textures.len() {
+                self.user_textures[index] = None;
+            }
+        }
+    }
+
+    pub fn get_texture(&self, texture_id: egui::TextureId) -> Option<&SrgbTexture2d> {
+        match texture_id {
+            egui::TextureId::Egui => self.egui_texture.as_ref(),
+            egui::TextureId::User(id) => self
+                .user_textures
+                .get(id as usize)?
+                .as_ref()?
+                .gl_texture
+                .as_ref(),
+        }
+    }
+
+    pub fn upload_pending_user_textures(&mut self, facade: &dyn glium::backend::Facade) {
+        for user_texture in &mut self.user_textures {
+            if let Some(user_texture) = user_texture {
+                if user_texture.gl_texture.is_none() {
+                    let pixels = std::mem::take(&mut user_texture.pixels);
+                    let format = texture::SrgbFormat::U8U8U8U8;
+                    let mipmaps = texture::MipmapsOption::NoMipmap;
+                    user_texture.gl_texture =
+                        Some(SrgbTexture2d::with_format(facade, pixels, format, mipmaps).unwrap());
+                }
+            }
+        }
     }
 }

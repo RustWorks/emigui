@@ -1,21 +1,13 @@
 use std::hash::Hash;
 
-use crate::{
-    layout::Direction,
-    paint::{LineStyle, PaintCmd, Path, TextStyle},
-    widgets::Label,
-    *,
-};
+use crate::{widgets::Label, *};
+use epaint::{Shape, TextStyle};
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-#[cfg_attr(feature = "serde", serde(default))]
+#[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "persistence", serde(default))]
 pub(crate) struct State {
     open: bool,
-
-    // Times are relative, and we don't want to continue animations anyway, hence `serde(skip)`
-    #[cfg_attr(feature = "serde", serde(skip))]
-    toggle_time: f64,
 
     /// Height of the region when open. Used for animations
     open_height: Option<f32>,
@@ -25,15 +17,14 @@ impl Default for State {
     fn default() -> Self {
         Self {
             open: false,
-            toggle_time: -f64::INFINITY,
             open_height: None,
         }
     }
 }
 
 impl State {
-    pub fn from_memory_with_default_open(ui: &Ui, id: Id, default_open: bool) -> Self {
-        *ui.memory().collapsing_headers.entry(id).or_insert(State {
+    pub fn from_memory_with_default_open(ctx: &Context, id: Id, default_open: bool) -> Self {
+        *ctx.memory().collapsing_headers.entry(id).or_insert(State {
             open: default_open,
             ..Default::default()
         })
@@ -41,226 +32,302 @@ impl State {
 
     // Helper
     pub fn is_open(ctx: &Context, id: Id) -> Option<bool> {
-        ctx.memory()
-            .collapsing_headers
-            .get(&id)
-            .map(|state| state.open)
+        if ctx.memory().everything_is_visible() {
+            Some(true)
+        } else {
+            ctx.memory()
+                .collapsing_headers
+                .get(&id)
+                .map(|state| state.open)
+        }
     }
 
     pub fn toggle(&mut self, ui: &Ui) {
         self.open = !self.open;
-        self.toggle_time = ui.input().time;
         ui.ctx().request_repaint();
     }
 
     /// 0 for closed, 1 for open, with tweening
-    pub fn openness(&self, ui: &Ui) -> f32 {
-        let animation_time = ui.style().animation_time;
-        let time_since_toggle = (ui.input().time - self.toggle_time) as f32;
-        let time_since_toggle = time_since_toggle + ui.input().predicted_dt; // Instant feedback
-        if time_since_toggle <= animation_time {
-            ui.ctx().request_repaint();
-        }
-        if self.open {
-            remap_clamp(time_since_toggle, 0.0..=animation_time, 0.0..=1.0)
+    pub fn openness(&self, ctx: &Context, id: Id) -> f32 {
+        if ctx.memory().everything_is_visible() {
+            1.0
         } else {
-            remap_clamp(time_since_toggle, 0.0..=animation_time, 1.0..=0.0)
+            ctx.animate_bool(id, self.open)
         }
-    }
-
-    /// Paint the arrow icon that indicated if the region is open or not
-    pub fn paint_icon(&self, ui: &mut Ui, interact: &InteractInfo) {
-        let stroke_color = ui.style().interact(interact).stroke_color;
-        let stroke_width = ui.style().interact(interact).stroke_width;
-
-        let rect = interact.rect;
-
-        let openness = self.openness(ui);
-
-        // Draw a pointy triangle arrow:
-        let rect = Rect::from_center_size(rect.center(), vec2(rect.width(), rect.height()) * 0.75);
-        let mut points = [rect.left_top(), rect.right_top(), rect.center_bottom()];
-        let rotation = Vec2::angled(remap(openness, 0.0..=1.0, -TAU / 4.0..=0.0));
-        for p in &mut points {
-            let v = *p - rect.center();
-            let v = rotation.rotate_other(v);
-            *p = rect.center() + v;
-        }
-
-        ui.painter().add(PaintCmd::Path {
-            path: Path::from_point_loop(&points),
-            closed: true,
-            fill: None,
-            outline: Some(LineStyle::new(stroke_width, stroke_color)),
-        });
     }
 
     /// Show contents if we are open, with a nice animation between closed and open
     pub fn add_contents<R>(
         &mut self,
         ui: &mut Ui,
+        id: Id,
         add_contents: impl FnOnce(&mut Ui) -> R,
-    ) -> Option<(R, Rect)> {
-        let openness = self.openness(ui);
-        let animate = 0.0 < openness && openness < 1.0;
-        if animate {
-            ui.ctx().request_repaint();
-            Some(ui.add_custom(|child_ui| {
-                let max_height = if self.open {
-                    if let Some(full_height) = self.open_height {
-                        remap_clamp(openness, 0.0..=1.0, 0.0..=full_height)
-                    } else {
-                        // First frame of expansion.
-                        // We don't know full height yet, but we will next frame.
-                        // Just use a placehodler value that shows some movement:
-                        10.0
-                    }
+    ) -> Option<InnerResponse<R>> {
+        let openness = self.openness(ui.ctx(), id);
+        if openness <= 0.0 {
+            None
+        } else if openness < 1.0 {
+            Some(ui.wrap(|child_ui| {
+                let max_height = if self.open && self.open_height.is_none() {
+                    // First frame of expansion.
+                    // We don't know full height yet, but we will next frame.
+                    // Just use a placeholder value that shows some movement:
+                    10.0
                 } else {
                     let full_height = self.open_height.unwrap_or_default();
                     remap_clamp(openness, 0.0..=1.0, 0.0..=full_height)
                 };
 
                 let mut clip_rect = child_ui.clip_rect();
-                clip_rect.max.y = clip_rect.max.y.min(child_ui.rect().top() + max_height);
+                clip_rect.max.y = clip_rect.max.y.min(child_ui.max_rect().top() + max_height);
                 child_ui.set_clip_rect(clip_rect);
 
-                let top_left = child_ui.top_left();
-                let r = add_contents(child_ui);
+                let ret = add_contents(child_ui);
 
-                self.open_height = Some(child_ui.bounding_size().y);
+                let mut min_rect = child_ui.min_rect();
+                self.open_height = Some(min_rect.height());
 
-                // Pretend children took up less space:
-                let mut child_bounds = child_ui.child_bounds();
-                child_bounds.max.y = child_bounds.max.y.min(top_left.y + max_height);
-                child_ui.force_set_child_bounds(child_bounds);
-                r
+                // Pretend children took up at most `max_height` space:
+                min_rect.max.y = min_rect.max.y.at_most(min_rect.top() + max_height);
+                child_ui.force_set_min_rect(min_rect);
+                ret
             }))
-        } else if self.open {
-            let r_interact = ui.add_custom(add_contents);
-            let full_size = r_interact.1.size();
-            self.open_height = Some(full_size.y);
-            Some(r_interact)
         } else {
-            None
+            let ret_response = ui.wrap(add_contents);
+            let full_size = ret_response.response.rect.size();
+            self.open_height = Some(full_size.y);
+            Some(ret_response)
         }
     }
 }
 
-/// A header which can be collapsed/expanded, revealing a contained `Ui` region.
+/// Paint the arrow icon that indicated if the region is open or not
+pub(crate) fn paint_icon(ui: &mut Ui, openness: f32, response: &Response) {
+    let visuals = ui.style().interact(response);
+    let stroke = visuals.fg_stroke;
+
+    let rect = response.rect;
+
+    // Draw a pointy triangle arrow:
+    let rect = Rect::from_center_size(rect.center(), vec2(rect.width(), rect.height()) * 0.75);
+    let rect = rect.expand(visuals.expansion);
+    let mut points = vec![rect.left_top(), rect.right_top(), rect.center_bottom()];
+    use std::f32::consts::TAU;
+    let rotation = emath::Rot2::from_angle(remap(openness, 0.0..=1.0, -TAU / 4.0..=0.0));
+    for p in &mut points {
+        *p = rect.center() + rotation * (*p - rect.center());
+    }
+
+    ui.painter().add(Shape::closed_line(points, stroke));
+}
+
+/// A header which can be collapsed/expanded, revealing a contained [`Ui`] region.
+///
+///
+/// ```
+/// # let ui = &mut egui::Ui::__test();
+/// egui::CollapsingHeader::new("Heading")
+///     .show(ui, |ui| {
+///         ui.label("Contents");
+///     });
+///
+/// // Short version:
+/// ui.collapsing("Heading", |ui| { ui.label("Contents"); });
+/// ```
 pub struct CollapsingHeader {
     label: Label,
     default_open: bool,
-    id_source: Option<Id>,
+    id_source: Id,
+    enabled: bool,
 }
 
 impl CollapsingHeader {
+    /// The `CollapsingHeader` starts out collapsed unless you call `default_open`.
+    ///
+    /// The label is used as an [`Id`] source.
+    /// If the label is unique and static this is fine,
+    /// but if it changes or there are several `CollapsingHeader` with the same title
+    /// you need to provide a unique id source with [`Self::id_source`].
     pub fn new(label: impl Into<String>) -> Self {
+        let label = Label::new(label).text_style(TextStyle::Button).wrap(false);
+        let id_source = Id::new(label.text());
         Self {
-            label: Label::new(label)
-                .text_style(TextStyle::Button)
-                .multiline(false),
+            label,
             default_open: false,
-            id_source: None,
+            id_source,
+            enabled: true,
         }
     }
 
+    /// By default, the `CollapsingHeader` is collapsed.
+    /// Call `.default_open(true)` to change this.
     pub fn default_open(mut self, open: bool) -> Self {
         self.default_open = open;
         self
     }
 
     /// Explicitly set the source of the `Id` of this widget, instead of using title label.
-    /// This is useful if the title label is dynamics.
+    /// This is useful if the title label is dynamic or not unique.
     pub fn id_source(mut self, id_source: impl Hash) -> Self {
-        self.id_source = Some(Id::new(id_source));
+        self.id_source = Id::new(id_source);
+        self
+    }
+
+    /// By default, the `CollapsingHeader` text style is `TextStyle::Button`.
+    /// Call `.text_style(style)` to change this.
+    pub fn text_style(mut self, text_style: TextStyle) -> Self {
+        self.label = self.label.text_style(text_style);
+        self
+    }
+
+    /// If you set this to `false`, the `CollapsingHeader` will be grayed out and un-clickable.
+    ///
+    /// This is a convenience for [`Ui::set_enabled`].
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
         self
     }
 }
 
 struct Prepared {
     id: Id,
+    header_response: Response,
     state: State,
 }
 
 impl CollapsingHeader {
     fn begin(self, ui: &mut Ui) -> Prepared {
         assert!(
-            ui.layout().dir() == Direction::Vertical,
+            ui.layout().main_dir().is_vertical(),
             "Horizontal collapsing is unimplemented"
         );
         let Self {
             label,
             default_open,
             id_source,
+            enabled: _,
         } = self;
 
         // TODO: horizontal layout, with icon and text as labels. Insert background behind using Frame.
 
-        let title = label.text();
-        let id = ui.make_unique_child_id_full(id_source, Some(title));
+        let id = ui.make_persistent_id(id_source);
+        let button_padding = ui.spacing().button_padding;
 
-        let available = ui.available_finite();
-        let text_pos = available.min + vec2(ui.style().indent, 0.0);
-        let galley = label.layout_width(ui, available.width() - ui.style().indent);
+        let available = ui.available_rect_before_wrap_finite();
+        let text_pos = available.min + vec2(ui.spacing().indent, 0.0);
+        let galley = label.layout_width(ui, available.right() - text_pos.x);
         let text_max_x = text_pos.x + galley.size.x;
-        let desired_width = text_max_x - available.left();
+        let desired_width = text_max_x + button_padding.x - available.left();
         let desired_width = desired_width.max(available.width());
 
-        let size = vec2(
-            desired_width,
-            galley.size.y + 2.0 * ui.style().button_padding.y,
+        let mut desired_size = vec2(desired_width, galley.size.y + 2.0 * button_padding.y);
+        desired_size = desired_size.at_least(ui.spacing().interact_size);
+        let (_, rect) = ui.allocate_space(desired_size);
+
+        let mut header_response = ui.interact(rect, id, Sense::click());
+        let text_pos = pos2(
+            text_pos.x,
+            header_response.rect.center().y - galley.size.y / 2.0,
         );
 
-        let rect = ui.allocate_space(size);
-        let interact = ui.interact(rect, id, Sense::click());
-        let text_pos = pos2(text_pos.x, interact.rect.center().y - galley.size.y / 2.0);
-
-        let mut state = State::from_memory_with_default_open(ui, id, default_open);
-        if interact.clicked {
+        let mut state = State::from_memory_with_default_open(ui.ctx(), id, default_open);
+        if header_response.clicked() {
             state.toggle(ui);
+            header_response.mark_changed();
         }
+        header_response
+            .widget_info(|| WidgetInfo::labeled(WidgetType::CollapsingHeader, &galley.text));
 
-        let bg_index = ui.painter().add(PaintCmd::Noop);
+        let visuals = ui.style().interact(&header_response);
+        let text_color = visuals.text_color();
+        ui.painter().add(Shape::Rect {
+            rect: header_response.rect.expand(visuals.expansion),
+            corner_radius: visuals.corner_radius,
+            fill: visuals.bg_fill,
+            stroke: visuals.bg_stroke,
+            // stroke: Default::default(),
+        });
 
         {
-            let (mut icon_rect, _) = ui.style().icon_rectangles(interact.rect);
+            let (mut icon_rect, _) = ui.spacing().icon_rectangles(header_response.rect);
             icon_rect.set_center(pos2(
-                interact.rect.left() + ui.style().indent / 2.0,
-                interact.rect.center().y,
+                header_response.rect.left() + ui.spacing().indent / 2.0,
+                header_response.rect.center().y,
             ));
-            let icon_interact = InteractInfo {
+            let icon_response = Response {
                 rect: icon_rect,
-                ..interact
+                ..header_response.clone()
             };
-            state.paint_icon(ui, &icon_interact);
+            let openness = state.openness(ui.ctx(), id);
+            paint_icon(ui, openness, &icon_response);
         }
 
-        let painter = ui.painter();
-        painter.galley(
+        ui.painter().galley(
             text_pos,
             galley,
-            label.text_style,
-            ui.style().interact(&interact).stroke_color,
+            label.text_style_or_default(ui.style()),
+            text_color,
         );
 
-        painter.set(
-            bg_index,
-            PaintCmd::Rect {
-                corner_radius: ui.style().interact(&interact).corner_radius,
-                fill: ui.style().interact(&interact).bg_fill,
-                outline: None,
-                rect: interact.rect,
-            },
-        );
-
-        Prepared { id, state }
+        Prepared {
+            id,
+            header_response,
+            state,
+        }
     }
 
-    pub fn show<R>(self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> Option<R> {
-        let Prepared { id, mut state } = self.begin(ui);
-        let r_interact = state.add_contents(ui, |ui| ui.indent(id, add_contents).0);
-        let ret = r_interact.map(|ri| ri.0);
-        ui.memory().collapsing_headers.insert(id, state);
-        ret
+    pub fn show<R>(
+        self,
+        ui: &mut Ui,
+        add_contents: impl FnOnce(&mut Ui) -> R,
+    ) -> CollapsingResponse<R> {
+        let header_enabled = self.enabled;
+        ui.wrap(|ui| {
+            ui.set_enabled(header_enabled);
+
+            // Make sure contents are bellow header,
+            // and make sure it is one unit (necessary for putting a `CollapsingHeader` in a grid).
+            ui.vertical(|ui| {
+                let Prepared {
+                    id,
+                    header_response,
+                    mut state,
+                } = self.begin(ui);
+                let ret_response = state.add_contents(ui, id, |ui| {
+                    ui.indent(id, |ui| {
+                        // make as wide as the header:
+                        ui.expand_to_include_x(header_response.rect.right());
+                        add_contents(ui)
+                    })
+                    .inner
+                });
+                ui.memory().collapsing_headers.insert(id, state);
+
+                if let Some(ret_response) = ret_response {
+                    CollapsingResponse {
+                        header_response,
+                        body_response: Some(ret_response.response),
+                        body_returned: Some(ret_response.inner),
+                    }
+                } else {
+                    CollapsingResponse {
+                        header_response,
+                        body_response: None,
+                        body_returned: None,
+                    }
+                }
+            })
+            .inner
+        })
+        .inner
     }
+}
+
+/// The response from showing a [`CollapsingHeader`].
+pub struct CollapsingResponse<R> {
+    pub header_response: Response,
+    /// None iff collapsed.
+    pub body_response: Option<Response>,
+    /// None iff collapsed.
+    pub body_returned: Option<R>,
 }

@@ -1,13 +1,13 @@
-//! Menu bar functionality.
+//! Menu bar functionality (very basic so far).
 //!
 //! Usage:
-//! ``` rust
+//! ```
 //! fn show_menu(ui: &mut egui::Ui) {
 //!     use egui::{menu, Button};
 //!
 //!     menu::bar(ui, |ui| {
 //!         menu::menu(ui, "File", |ui| {
-//!             if ui.add(Button::new("Open")).clicked {
+//!             if ui.button("Open").clicked() {
 //!                 // ...
 //!             }
 //!         });
@@ -16,25 +16,12 @@
 //! ```
 
 use crate::{widgets::*, *};
+use epaint::Stroke;
 
 /// What is saved between frames.
-#[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BarState {
-    #[cfg_attr(feature = "serde", serde(skip))]
     open_menu: Option<Id>,
-    #[cfg_attr(feature = "serde", serde(skip))]
-    /// When did we open a menu?
-    open_time: f64,
-}
-
-impl Default for BarState {
-    fn default() -> Self {
-        Self {
-            open_menu: None,
-            open_time: f64::NEG_INFINITY,
-        }
-    }
 }
 
 impl BarState {
@@ -49,43 +36,28 @@ impl BarState {
     fn save(self, ctx: &Context, bar_id: Id) {
         ctx.memory().menu_bar.insert(bar_id, self);
     }
-
-    fn close_menus(ctx: &Context, bar_id: Id) {
-        let mut bar_state = BarState::load(ctx, &bar_id);
-        bar_state.open_menu = None;
-        bar_state.save(ctx, bar_id);
-    }
 }
 
-pub fn bar<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
-    ui.inner_layout(Layout::horizontal(Align::Center), |ui| {
-        Frame::menu_bar(ui.style()).show(ui, |ui| {
-            let mut style = ui.style().clone();
-            style.button_padding = vec2(2.0, 0.0);
-            // style.interact.active.bg_fill = None;
-            style.interact.active.rect_outline = None;
-            // style.interact.hovered.bg_fill = None;
-            style.interact.hovered.rect_outline = None;
-            style.interact.inactive.bg_fill = None;
-            style.interact.inactive.rect_outline = None;
-            ui.set_style(style);
+/// The menu bar goes well in `TopPanel`,
+/// but can also be placed in a `Window`.
+/// In the latter case you may want to wrap it in `Frame`.
+pub fn bar<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    ui.horizontal(|ui| {
+        let mut style = (**ui.style()).clone();
+        style.spacing.button_padding = vec2(2.0, 0.0);
+        // style.visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
+        style.visuals.widgets.active.bg_stroke = Stroke::none();
+        // style.visuals.widgets.hovered.bg_fill = Color32::TRANSPARENT;
+        style.visuals.widgets.hovered.bg_stroke = Stroke::none();
+        style.visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+        style.visuals.widgets.inactive.bg_stroke = Stroke::none();
+        ui.set_style(style);
 
-            // Take full width and fixed height:
-            let height = ui.style().menu_bar.height;
-            ui.set_desired_height(height);
-            ui.expand_to_size(vec2(ui.available().width(), height));
+        // Take full width and fixed height:
+        let height = ui.spacing().interact_size.y;
+        ui.set_min_size(vec2(ui.available_width(), height));
 
-            let ret = add_contents(ui);
-
-            let clicked_outside = !ui.hovered(ui.rect()) && ui.input().mouse.released;
-            if clicked_outside || ui.input().key_pressed(Key::Escape) {
-                // TODO: this prevent sub-menus in menus. We should fix that.
-                let bar_id = ui.id();
-                BarState::close_menus(ui.ctx(), bar_id);
-            }
-
-            ret
-        })
+        add_contents(ui)
     })
 }
 
@@ -108,75 +80,47 @@ fn menu_impl<'c>(
     let mut button = Button::new(title);
 
     if bar_state.open_menu == Some(menu_id) {
-        button = button.fill(Some(ui.style().interact.active.fill));
+        button = button.fill(Some(ui.visuals().selection.bg_fill));
     }
 
-    let button_interact = ui.add(button);
+    let button_response = ui.add(button);
+    if button_response.clicked() {
+        // Toggle
+        if bar_state.open_menu == Some(menu_id) {
+            bar_state.open_menu = None;
+        } else {
+            bar_state.open_menu = Some(menu_id);
+        }
+    } else if button_response.hovered() && bar_state.open_menu.is_some() {
+        bar_state.open_menu = Some(menu_id);
+    }
 
-    interact_with_menu_button(&mut bar_state, ui.input(), menu_id, &button_interact);
-
-    if bar_state.open_menu == Some(menu_id) {
+    if bar_state.open_menu == Some(menu_id) || ui.ctx().memory().everything_is_visible() {
         let area = Area::new(menu_id)
             .order(Order::Foreground)
-            .fixed_pos(button_interact.rect.left_bottom());
+            .fixed_pos(button_response.rect.left_bottom());
         let frame = Frame::menu(ui.style());
 
-        let resize = Resize::default().auto_sized().outline(false);
-
-        let menu_interact = area.show(ui.ctx(), |ui| {
+        area.show(ui.ctx(), |ui| {
             frame.show(ui, |ui| {
-                resize.show(ui, |ui| {
-                    let mut style = ui.style().clone();
-                    style.button_padding = vec2(2.0, 0.0);
-                    // style.interact.active.bg_fill = None;
-                    style.interact.active.rect_outline = None;
-                    // style.interact.hovered.bg_fill = None;
-                    style.interact.hovered.rect_outline = None;
-                    style.interact.inactive.bg_fill = None;
-                    style.interact.inactive.rect_outline = None;
-                    ui.set_style(style);
-                    ui.set_layout(Layout::justified(Direction::Vertical));
-                    add_contents(ui)
-                })
+                let mut style = (**ui.style()).clone();
+                style.spacing.button_padding = vec2(2.0, 0.0);
+                // style.visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
+                style.visuals.widgets.active.bg_stroke = Stroke::none();
+                // style.visuals.widgets.hovered.bg_fill = Color32::TRANSPARENT;
+                style.visuals.widgets.hovered.bg_stroke = Stroke::none();
+                style.visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+                style.visuals.widgets.inactive.bg_stroke = Stroke::none();
+                ui.set_style(style);
+                ui.with_layout(Layout::top_down_justified(Align::LEFT), add_contents);
             })
         });
 
-        if menu_interact.hovered && ui.input().mouse.released {
+        // TODO: this prevents sub-menus in menus. We should fix that.
+        if ui.input().key_pressed(Key::Escape) || button_response.clicked_elsewhere() {
             bar_state.open_menu = None;
         }
     }
 
     bar_state.save(ui.ctx(), bar_id);
-}
-
-fn interact_with_menu_button(
-    bar_state: &mut BarState,
-    input: &InputState,
-    menu_id: Id,
-    button_interact: &GuiResponse,
-) {
-    if button_interact.hovered && input.mouse.pressed {
-        if bar_state.open_menu.is_some() {
-            bar_state.open_menu = None;
-        } else {
-            bar_state.open_menu = Some(menu_id);
-            bar_state.open_time = input.time;
-        }
-    }
-
-    if button_interact.hovered && input.mouse.released && bar_state.open_menu.is_some() {
-        let time_since_open = input.time - bar_state.open_time;
-        if time_since_open < 0.4 {
-            // A quick click
-            bar_state.open_menu = Some(menu_id);
-            bar_state.open_time = input.time;
-        } else {
-            // A long hold, then release
-            bar_state.open_menu = None;
-        }
-    }
-
-    if button_interact.hovered && bar_state.open_menu.is_some() {
-        bar_state.open_menu = Some(menu_id);
-    }
 }

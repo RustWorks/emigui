@@ -1,6 +1,6 @@
 [package]
 name = "egui"
-version = "0.1.3"
+version = "0.10.0"
 authors = ["Emil Ernerfeldt <emil.ernerfeldt@gmail.com>"]
 description = "Simple, portable immediate mode GUI library for Rust"
 edition = "2018"
@@ -8,22 +8,29 @@ homepage = "https://github.com/emilk/egui"
 license = "MIT OR Apache-2.0"
 readme = "../README.md"
 repository = "https://github.com/emilk/egui"
-categories = ["gui", "graphics"]
+categories = ["gui", "game-development"]
 keywords = ["gui", "imgui", "immediate", "portable", "gamedev"]
-include = [ "**/*.rs", "Cargo.toml", "fonts/ProggyClean.ttf", "fonts/Comfortaa-Regular.ttf"]
+include = [
+  "../LICENSE-APACHE",
+  "../LICENSE-MIT",
+  "**/*.rs",
+  "Cargo.toml",
+]
 
 [lib]
 
 [dependencies]
-ahash = "0.4"
-parking_lot = "0.11"
-rusttype = "0.9"
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+epaint = { version = "0.10.0", path = "../epaint", default-features = false }
+serde = { version = "1", features = ["derive", "rc"], optional = true }
 
-[dev-dependencies]
-criterion = { version = "0.3", default-features = false }
+[features]
+default = ["default_fonts", "single_threaded"]
+persistence = ["serde", "epaint/persistence"]
 
-[[bench]]
-name = "benchmark"
-harness = false
+# If set, egui will use `include_bytes!` to bundle some fonts.
+# If you plan on specifying your own fonts you may disable this feature.
+default_fonts = ["epaint/default_fonts"]
+
+# Only needed if you plan to use the same egui::Context from multiple threads.
+single_threaded = ["epaint/single_threaded"]
+multi_threaded = ["epaint/multi_threaded"]
